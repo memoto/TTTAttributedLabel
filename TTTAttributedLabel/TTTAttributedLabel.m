@@ -729,7 +729,7 @@ static inline CGSize CTFramesetterSuggestFrameSizeForAttributedStringWithConstra
 
     CFArrayRef lines = CTFrameGetLines(frame);
     NSInteger numberOfLines = self.numberOfLines > 0 ? MIN(self.numberOfLines, CFArrayGetCount(lines)) : CFArrayGetCount(lines);
-    BOOL truncateLastLine = (self.lineBreakMode == TTTLineBreakByTruncatingHead || self.lineBreakMode == TTTLineBreakByTruncatingMiddle || self.lineBreakMode == TTTLineBreakByTruncatingTail);
+    BOOL truncateLastLine = (self.lineBreakMode == TTTLineBreakByTruncatingHead || self.lineBreakMode == TTTLineBreakByTruncatingMiddle || self.lineBreakMode == TTTLineBreakByTruncatingTail || self.lineBreakMode == TTTLineBreakByWordWrapping);
 
     CGPoint lineOrigins[numberOfLines];
     CTFrameGetLineOrigins(frame, CFRangeMake(0, numberOfLines), lineOrigins);
@@ -755,11 +755,6 @@ static inline CGSize CTFramesetterSuggestFrameSizeForAttributedStringWithConstra
                 CFIndex truncationAttributePosition = lastLineRange.location;
                 TTTLineBreakMode lineBreakMode = self.lineBreakMode;
 
-                // Multiple lines, only use UILineBreakModeTailTruncation
-                if (numberOfLines != 1) {
-                    lineBreakMode = TTTLineBreakByTruncatingTail;
-                }
-
                 switch (lineBreakMode) {
                     case TTTLineBreakByTruncatingHead:
                         truncationType = kCTLineTruncationStart;
@@ -768,6 +763,10 @@ static inline CGSize CTFramesetterSuggestFrameSizeForAttributedStringWithConstra
                         truncationType = kCTLineTruncationMiddle;
                         truncationAttributePosition += (lastLineRange.length / 2);
                         break;
+					case TTTLineBreakByWordWrapping:
+						truncationType = kCTLineTruncationEnd;
+						truncationAttributePosition += (lastLineRange.length);
+						break;
                     case TTTLineBreakByTruncatingTail:
                     default:
                         truncationType = kCTLineTruncationEnd;
@@ -800,21 +799,52 @@ static inline CGSize CTFramesetterSuggestFrameSizeForAttributedStringWithConstra
                         [truncationString deleteCharactersInRange:NSMakeRange((NSUInteger)(lastLineRange.length - 1), 1)];
                     }
                 }
-                [truncationString appendAttributedString:attributedTruncationString];
-                CTLineRef truncationLine = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)truncationString);
 
                 // Truncate the line in case it is too long.
-                CTLineRef truncatedLine = CTLineCreateTruncatedLine(truncationLine, rect.size.width, truncationType, truncationToken);
+				CTLineRef truncatedLine = ^() {
+
+					if (lineBreakMode == TTTLineBreakByWordWrapping) {
+
+						CTLineRef truncationLine = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)truncationString);
+
+						CGRect truncationTokenBounds = CTLineGetBoundsWithOptions(truncationToken, 0);
+						CTTypesetterRef truncationTypesetter = CTTypesetterCreateWithAttributedString((__bridge CFAttributedStringRef)truncationString);
+						CFIndex truncationEnd = CTTypesetterSuggestLineBreak(truncationTypesetter, 0, rect.size.width - truncationTokenBounds.size.width);
+						CTLineRef truncatedLine = CTTypesetterCreateLine(truncationTypesetter, CFRangeMake(0, truncationEnd));
+
+
+						CFRelease(truncationLine);
+						return truncatedLine;
+					}
+					else {
+						[truncationString appendAttributedString:attributedTruncationString];
+						CTLineRef truncationLine = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)truncationString);
+
+						CTLineRef truncatedLine = CTLineCreateTruncatedLine(truncationLine, rect.size.width, truncationType, truncationToken);
+
+						CFRelease(truncationLine);
+						return truncatedLine;
+					}
+				}();
+
                 if (!truncatedLine) {
                     // If the line is not as wide as the truncationToken, truncatedLine is NULL
                     truncatedLine = CFRetain(truncationToken);
                 }
 
                 CGFloat penOffset = (CGFloat)CTLineGetPenOffsetForFlush(truncatedLine, flushFactor, rect.size.width);
-                CGContextSetTextPosition(c, penOffset, lineOrigin.y - descent - self.font.descender);
+				CGFloat textPosY = lineOrigin.y - descent - self.font.descender;
+                CGContextSetTextPosition(c, penOffset, textPosY);
 
                 CTLineDraw(truncatedLine, c);
-                
+				if (lineBreakMode == TTTLineBreakByWordWrapping) {
+
+					CGRect truncatedLineBounds = CTLineGetBoundsWithOptions(truncatedLine, kCTLineBoundsUseGlyphPathBounds);
+
+					CGContextSetTextPosition(c, penOffset + truncatedLineBounds.size.width + 1, textPosY);
+					CTLineDraw(truncationToken, c);
+				}
+
                 NSRange linkRange;
                 if ([attributedTruncationString attribute:NSLinkAttributeName atIndex:0 effectiveRange:&linkRange]) {
                     NSRange tokenRange = [truncationString.string rangeOfString:attributedTruncationString.string];
@@ -824,7 +854,6 @@ static inline CGSize CTFramesetterSuggestFrameSizeForAttributedStringWithConstra
                 }
 
                 CFRelease(truncatedLine);
-                CFRelease(truncationLine);
                 CFRelease(truncationToken);
             } else {
                 CGFloat penOffset = (CGFloat)CTLineGetPenOffsetForFlush(line, flushFactor, rect.size.width);
